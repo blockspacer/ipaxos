@@ -93,7 +93,9 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 
-add_library(paxos_node SHARED "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_node.cc"
+add_library(paxos_node SHARED
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_node.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_impl.cc"
   ${hw_proto_srcs}
   ${hw_grpc_srcs})
 target_link_libraries(paxos_node
@@ -109,6 +111,7 @@ foreach(_target unit_test_learn)
     ${hw_proto_srcs}
     ${hw_grpc_srcs})
   target_link_libraries(${_target}
+    tbb
     boost_context
     boost_fiber
     boost_system
