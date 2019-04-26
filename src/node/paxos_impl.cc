@@ -2,15 +2,31 @@
 #include "../common/utils.h"
 
 PaxosMsg
+PaxosInvoker::propose(const std::string& value) {
+  PaxosMsg request, reply;
+  ClientContext context;
+  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT * 2);
+  request.set_value(value);
+  auto status = stub_->propose(&context, request, &reply);
+
+  if (status.ok()) {
+    return reply;
+  } else {
+    std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
+    abort();
+  }
+}
+
+PaxosMsg
 PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
                            InstanceIDT instance_id,
                            const std::string* value) {
   PaxosMsg request, reply;
-  if (value != nullptr) {
-    auto v = new google::protobuf::BytesValue;
-    v->set_value(*value);
-    request.set_allocated_value(v);
-  }
+  if (value != nullptr)
+    request.set_value(*value);
+  else
+    request.set_value(string());
+
   request.set_epoch(epoch);
   request.set_node_id(node_id);
   request.set_instance_id(instance_id);
@@ -31,11 +47,11 @@ PaxosInvoker::learn(EpochT epoch, NodeIDT node_id,
                          InstanceIDT instance_id,
                          const std::string* value) {
   PaxosMsg request, reply;
-  if (value != nullptr) {
-    auto v = new google::protobuf::BytesValue;
-    v->set_value(*value);
-    request.set_allocated_value(v);
-  }
+  if (value != nullptr)
+    request.set_value(*value);
+  else
+    request.set_value(string());
+
   request.set_epoch(epoch);
   request.set_node_id(node_id);
   request.set_instance_id(instance_id);
@@ -57,16 +73,16 @@ void PaxosImpl::handle_proposals() {
   while (true) {
     CommandT c;
     while (!command_chan.try_pop(c)) {}
-    auto inst_id = next_id.fetch_add(1, std::memory_order_acq_rel);
-    auto epoch = view.epoch;
-    auto self_id = view.self_id;
-    c.first->epoch = view.epoch;
-    c.first->id = inst_id;
-    auto str = c.second;
     // if I'm leader
-    std::atomic<uint32_t> counter;
-    counter.store(1, std::memory_order_release);
     if (view.self_id == view.leader_id) {
+      auto inst_id = next_id.fetch_add(1, std::memory_order_acq_rel);
+      auto epoch = view.epoch;
+      auto self_id = view.self_id;
+      c.first->epoch = view.epoch;
+      c.first->id = inst_id;
+      auto str = c.second;
+      std::atomic<uint32_t> counter;
+      counter.store(1, std::memory_order_release);
       std::vector<boost::fibers::fiber> fbs;
       for (auto &invoker: invokers) {
         if (invoker.first != view.self_id) {
@@ -120,6 +136,10 @@ void PaxosImpl::handle_proposals() {
       } else {
         abort();
       }
+    } else {
+      // if not leader, forward to leader
+      invokers[view.leader_id]->propose(*c.second);
+      c.first->finish_propose(true);
     }
   }
 }
@@ -170,9 +190,8 @@ PaxosImpl::commit(grpc::ServerContext* context,
     auto inst_res = records.insert(kv_pair);
     response->set_result(PaxosMsg::SUCCESS);
     if (inst_res.second) {
-      if (request->has_value()) {
-        auto value = new string;
-        *value = request->value().value();
+      if (request->value().length() != 0) {
+        auto value = new string(request->value());
         inst_res.first->second.value = value;
       }
     } else {
@@ -180,13 +199,13 @@ PaxosImpl::commit(grpc::ServerContext* context,
       if (kv_pair.second.promised_epoch > inst_res.first->second.promised_epoch) {
         inst_res.first->second.status = PREPARED;
         inst_res.first->second.promised_epoch = kv_pair.second.promised_epoch;
-        if (request->has_value()) {
+        if (request->value().length() != 0) {
           if (inst_res.first->second.value == nullptr ||
-              !bytes_eq(*inst_res.first->second.value, request->value().value())) {
+              !bytes_eq(*inst_res.first->second.value, request->value())) {
             if (inst_res.first->second.value != nullptr)
               delete inst_res.first->second.value;
             string* value = new string;
-            *value = request->value().value();
+            *value = request->value();
             inst_res.first->second.value = value;
           }
         }
@@ -214,9 +233,9 @@ PaxosImpl::learn(grpc::ServerContext* context,
   auto inst_res = records.insert(kv_pair);
   response->set_result(PaxosMsg::SUCCESS);
   if (inst_res.second) {
-    if (request->has_value()) {
+    if (request->value().length() != 0) {
       auto value = new string;
-      *value = request->value().value();
+      *value = request->value();
       inst_res.first->second.value = value;
     }
   } else {
@@ -224,13 +243,13 @@ PaxosImpl::learn(grpc::ServerContext* context,
       response->set_result(PaxosMsg::CONFLICT);
     } else {
       inst_res.first->second.status = LEARNED;
-      if (request->has_value()) {
+      if (request->value().length() != 0) {
         if (inst_res.first->second.value == nullptr ||
-            !bytes_eq(*inst_res.first->second.value, request->value().value())) {
+            !bytes_eq(*inst_res.first->second.value, request->value())) {
           if (inst_res.first->second.value != nullptr)
             delete inst_res.first->second.value;
           string* value = new string;
-          *value = request->value().value();
+          *value = request->value();
           inst_res.first->second.value = value;
         }
       }
@@ -242,10 +261,21 @@ PaxosImpl::learn(grpc::ServerContext* context,
 
 Status
 PaxosImpl::propose(grpc::ServerContext* context,
-                   const ProposeRequest* request,
-                   ProposeResult* result) {
-  result->set_success(true);
-  return Status::OK;
+                   const PaxosMsg* request,
+                   PaxosMsg* result) {
+  while (!context->IsCancelled()) {
+    auto token = this->async_propose(request->value());
+    while (!token->is_finished()) {
+      std::this_thread::yield();
+      if (context->IsCancelled())
+        break;
+      if (token->get_result()) {
+        result->set_result(PaxosMsg::SUCCESS);
+        return Status::OK;
+      }
+    }
+  }
+  return Status::CANCELLED;
 }
 
 std::shared_ptr<ProposeToken>

@@ -6,17 +6,9 @@ service Paxos
 {
   rpc commit (PaxosMsg) returns (PaxosMsg) {}
   rpc learn (PaxosMsg) returns (PaxosMsg) {}
-  rpc propose (ProposeRequest) returns (ProposeResult) {}
-}
-
-message ProposeRequest
-{
-  bytes value = 1;
-}
-
-message ProposeResult
-{
-  bool success = 1;
+  rpc get_vote (PaxosMsg) returns (PaxosMsg) {}
+  rpc ask_follow (PaxosMsg) returns (PaxosMsg) {}
+  rpc propose (PaxosMsg) returns (PaxosMsg) {}
 }
 
 message PaxosMsg
@@ -25,7 +17,7 @@ message PaxosMsg
   uint64 epoch = 2;
   uint64 instance_id = 3;
   uint64 last_commit_id = 4;
-  google.protobuf.BytesValue value = 5;
+  bytes value = 5;
   enum Result {
     SUCCESS = 0;
     CONFLICT = 1; // hint the value already learned

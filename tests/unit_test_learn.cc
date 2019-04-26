@@ -28,17 +28,19 @@ int main()
 
   auto thread_count = std::thread::hardware_concurrency();
   boost::basic_thread_pool pool(thread_count);
-  for (int j = 0;j < 4;++j) {
-    pool.submit([&]() {
+  for (int j = 0;j < 3;++j) {
+    pool.submit([&, j]() {
       // boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(thread_count);
       std::vector<boost::fibers::fiber> handles;
-      for (int i = 0;i < 250;++i) {
+      for (int i = 0;i < 333;++i) {
+        boost::this_fiber::yield();
         auto e = std::to_string(i);
-        auto t = boost::fibers::fiber([=, &vm, &nodes](){
+        auto t = boost::fibers::fiber([&, j, e](){
           ClientContext context;
-          auto t = nodes[0].async_propose(e);
-          while (!t->is_finished())
+          auto t = nodes[j].async_propose(e);
+          while (!t->is_finished()) {
             boost::this_fiber::yield();
+          }
         });
         handles.push_back(std::move(t));
       }

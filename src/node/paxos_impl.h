@@ -14,8 +14,6 @@
 
 using ipaxos::Paxos;
 using ipaxos::PaxosMsg;
-using ipaxos::ProposeRequest;
-using ipaxos::ProposeResult;
 using grpc::Channel;
 using grpc::Status;
 using grpc::ClientContext;
@@ -141,6 +139,8 @@ public:
                  InstanceIDT instance_id,
                  const std::string* value);
 
+  PaxosMsg propose(const std::string& value);
+
 private:
   std::unique_ptr<Paxos::Stub> stub_;
 };
@@ -165,9 +165,21 @@ public:
                const PaxosMsg* request,
                PaxosMsg* response) override;
 
+  // start leader election
+  //Status get_vote(grpc::ServerContext* context,
+  //             const PaxosMsg* request,
+  //             PaxosMsg* response) override;
+
+
   Status propose(grpc::ServerContext* context,
-                 const ProposeRequest* request,
-                 ProposeResult* result) override;
+                 const PaxosMsg* request,
+                 PaxosMsg* result) override;
+
+  // true if become leader
+  // either way, returns when stable state is reached
+  bool try_leader_election();
+
+  void debug_start_leader_election();
 
   void debug_print() {
     mtx.lock();
