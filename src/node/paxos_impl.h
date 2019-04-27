@@ -10,7 +10,11 @@
 
 
 #define PAXOS_COMMIT_TIMEOUT 300
+#define PAXOS_VOTE_TIMEOUT 300
 #define PAXOS_LEARN_TIMEOUT 600
+
+#define PAXOS_RANDOM_WAIT_LOW 150
+#define PAXOS_RANDOM_WAIT_HIGH 300
 
 using ipaxos::Paxos;
 using ipaxos::PaxosMsg;
@@ -22,7 +26,8 @@ using grpc::ServerBuilder;
 
 enum PaxosRole {
   LEADER,
-  FOLLOWER
+  FOLLOWER,
+  CANDIDATE
 };
 
 enum InstanceStatus {
@@ -30,12 +35,6 @@ enum InstanceStatus {
   PREPARED,
   LEARNED,
   APPLIED
-};
-
-enum NodeStatus {
-  STABLE,
-  VIEWCHANGING,
-  FOLLOWUP
 };
 
 typedef uint64_t NodeIDT;
@@ -65,6 +64,11 @@ public:
 
   inline bool is_finished() {
     return finish.load(std::memory_order_acquire);
+  }
+
+  inline void wait() {
+    while (!finish.load(std::memory_order_acquire))
+      boost::this_fiber::yield();
   }
 
   inline bool get_result() {
@@ -103,24 +107,23 @@ class PaxosView {
 public:
   PaxosView() = default;
 
-  typedef std::map<NodeIDT, std::pair<std::string, PaxosRole>> ViewMapT;
-  bool init(EpochT epoch_, NodeIDT self_id_, const ViewMapT& vm_) {
+  typedef std::map<NodeIDT, std::string> ViewMapT;
+  bool init(EpochT epoch_, NodeIDT self_id_, NodeIDT leader_id_,
+            PaxosRole self_role_, const ViewMapT& vm_) {
     assert(epoch_ != 0);
     epoch = epoch_;
     vm = vm_;
     self_id = self_id_;
+    self_role = self_role_;
+    leader_id = leader_id_;
     std::cout << "self_id: " << self_id_ << std::endl;
-    for(const auto& kv : vm)
-      if (kv.second.second == LEADER) {
-        leader_id = kv.first;
-        return true;
-      }
-    return false;
+    return true;
   }
 
 
   NodeIDT leader_id;
   NodeIDT self_id;
+  PaxosRole self_role;
   EpochT epoch;
   ViewMapT vm;
 };
@@ -140,6 +143,8 @@ public:
                  const std::string* value);
 
   PaxosMsg propose(const std::string& value);
+
+  PaxosMsg get_vote(EpochT epoch, NodeIDT node_id);
 
 private:
   std::unique_ptr<Paxos::Stub> stub_;
@@ -166,9 +171,9 @@ public:
                PaxosMsg* response) override;
 
   // start leader election
-  //Status get_vote(grpc::ServerContext* context,
-  //             const PaxosMsg* request,
-  //             PaxosMsg* response) override;
+  Status get_vote(grpc::ServerContext* context,
+               const PaxosMsg* request,
+               PaxosMsg* response) override;
 
 
   Status propose(grpc::ServerContext* context,
@@ -179,7 +184,11 @@ public:
   // either way, returns when stable state is reached
   bool try_leader_election();
 
-  void debug_start_leader_election();
+  inline bool has_valid_leader() {
+    return leader_valid.load(std::memory_order_acquire);
+  }
+
+  void debug_request_leader();
 
   void debug_print() {
     mtx.lock();
@@ -222,8 +231,14 @@ private:
   std::thread _waiting_handler;
   std::thread _receiving_handler;
 
-  std::atomic<NodeStatus> status;
   std::atomic<InstanceIDT> next_id;
+  std::atomic<bool> leader_valid;
+
+  uint32_t vote_timeout;
+
+  // record largest voted epoch
+  EpochT voted_epoch = 0;
+  InstanceIDT voted_for = 0;
 
   PaxosChanT command_chan;
 

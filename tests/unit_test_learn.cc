@@ -10,13 +10,14 @@ using grpc::Server;
 int main()
 {
   PaxosView::ViewMapT vm;
-  vm[0] = {"localhost:40000", PaxosRole::LEADER};
-  vm[1] = {"localhost:40001", PaxosRole::FOLLOWER};
-  vm[2] = {"localhost:40002", PaxosRole::FOLLOWER};
+  vm[0] = "localhost:40000";
+  vm[1] = "localhost:40001";
+  vm[2] = "localhost:40002";
+  PaxosRole roles[3] = {PaxosRole::LEADER, PaxosRole::FOLLOWER, PaxosRole::FOLLOWER};
   PaxosNode nodes[3];
   for (int i = 0;i < 3;++i) {
     PaxosView view;
-    view.init(1, i, vm);
+    view.init(1, i, 0, roles[i], vm);
     nodes[i].init(view, PaxosConfig());
   }
 
@@ -30,17 +31,14 @@ int main()
   boost::basic_thread_pool pool(thread_count);
   for (int j = 0;j < 3;++j) {
     pool.submit([&, j]() {
-      // boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(thread_count);
+      boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(thread_count);
       std::vector<boost::fibers::fiber> handles;
       for (int i = 0;i < 333;++i) {
-        boost::this_fiber::yield();
         auto e = std::to_string(i);
         auto t = boost::fibers::fiber([&, j, e](){
           ClientContext context;
           auto t = nodes[j].async_propose(e);
-          while (!t->is_finished()) {
-            boost::this_fiber::yield();
-          }
+          t->wait();
         });
         handles.push_back(std::move(t));
       }

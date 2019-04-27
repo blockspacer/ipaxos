@@ -18,7 +18,7 @@ public:
   PaxosNode() = default;
   void init(PaxosView view, PaxosConfig config) {
     bool result = impl.init(std::move(view), std::move(config));
-    inited = true;
+    inited = result;
   }
 
   void init_invokers() { impl.init_invokers(); };
@@ -31,6 +31,9 @@ public:
     impl.debug_print();
   }
 
+  void debug_request_leader() {
+    impl.debug_request_leader();
+  }
 
   inline bool is_leader() { return impl.is_leader(); }
 

@@ -7,6 +7,7 @@ service Paxos
   rpc commit (PaxosMsg) returns (PaxosMsg) {}
   rpc learn (PaxosMsg) returns (PaxosMsg) {}
   rpc get_vote (PaxosMsg) returns (PaxosMsg) {}
+  // i.e. prepare
   rpc ask_follow (PaxosMsg) returns (PaxosMsg) {}
   rpc propose (PaxosMsg) returns (PaxosMsg) {}
 }
@@ -22,6 +23,7 @@ message PaxosMsg
     SUCCESS = 0;
     CONFLICT = 1; // hint the value already learned
     FOLLOWUP = 2; // hint to follow up
+    FAILURE = 3; // vote fail
   }
   Result result = 6;
 }
