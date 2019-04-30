@@ -1,66 +1,118 @@
 #include "paxos_impl.h"
 #include "../common/utils.h"
 
-PaxosMsg
-PaxosInvoker::propose(const std::string& value) {
+std::vector<PaxosMsg>
+PaxosInvoker::propose(const std::vector<std::string>& value) {
   PaxosMsg request, reply;
+  std::vector<PaxosMsg> replies;
   ClientContext context;
   auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT * 2);
-  request.set_value(value);
-  auto status = stub_->propose(&context, request, &reply);
+  // context.set_deadline(deadline);
+  // auto now = std::chrono::system_clock::now();
+  auto stream = stub_->propose(&context);
 
+  // auto t = boost::thread([&](){
+    for (auto &s: value) {
+      request.set_value(s);
+      stream->Write(request);
+    }
+    stream->WritesDone();
+  // });
+
+  while (stream->Read(&reply)) {
+    replies.push_back(reply);
+  }
+  // t.join();
+  auto status = stream->Finish();
+
+  // std::chrono::duration<double> diff = std::chrono::system_clock::now() - now;
+  // std::cout << "latency: " << diff.count() << std::endl;
   if (status.ok()) {
-    return reply;
+    return replies;
   } else {
     std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
     abort();
   }
 }
 
-PaxosMsg
+std::vector<PaxosMsg>
 PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
-                           InstanceIDT instance_id,
-                           const std::string* value) {
+                           std::vector<InstanceIDT> instance_id,
+                           const std::vector<std::string>& value) {
   PaxosMsg request, reply;
-  if (value != nullptr)
-    request.set_value(*value);
-  else
-    request.set_value(string());
-
+  std::vector<PaxosMsg> replies;
   request.set_epoch(epoch);
   request.set_node_id(node_id);
-  request.set_instance_id(instance_id);
+
   ClientContext context;
   auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
-  Status status = stub_->commit(&context, request, &reply);
+  context.set_deadline(deadline);
+  auto stream = stub_->commit(&context);
+
+  //auto t = boost::thread([&](){
+    int iter = 0;
+    for (auto &s: value) {
+      request.set_instance_id(instance_id[iter]);
+      request.set_value(s);
+      stream->Write(request);
+      iter++;
+    }
+    stream->WritesDone();
+  // });
+
+  for (auto &s: value) {
+    stream->Read(&reply);
+    replies.push_back(reply);
+  }
+  // t.join();
+
+
+  auto status = stream->Finish();
 
   if (status.ok()) {
-    return reply;
+    return replies;
   } else {
     std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
     abort();
   }
 }
 
-PaxosMsg
+std::vector<PaxosMsg>
 PaxosInvoker::learn(EpochT epoch, NodeIDT node_id,
-                         InstanceIDT instance_id,
-                         const std::string* value) {
+                         std::vector<InstanceIDT> instance_id,
+                         const std::vector<std::string>& value) {
   PaxosMsg request, reply;
-  if (value != nullptr)
-    request.set_value(*value);
-  else
-    request.set_value(string());
-
+  std::vector<PaxosMsg> replies;
   request.set_epoch(epoch);
   request.set_node_id(node_id);
-  request.set_instance_id(instance_id);
+
   ClientContext context;
   auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_LEARN_TIMEOUT);
-  Status status = stub_->learn(&context, request, &reply);
+  context.set_deadline(deadline);
+  auto stream = stub_->learn(&context);
+
+  //auto writer = boost::thread([&](){
+    int iter = 0;
+    for (auto s: value) {
+      request.set_instance_id(instance_id[iter]);
+      request.set_value(s);
+      stream->Write(request);
+      iter++;
+    }
+
+    stream->WritesDone();
+  // });
+
+  for (auto &s: value) {
+    stream->Read(&reply);
+    replies.push_back(reply);
+  }
+  // writer.join();
+
+  auto status = stream->Finish();
 
   if (status.ok()) {
-    return reply;
+    return replies;
   } else {
     std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
     abort();
@@ -116,7 +168,7 @@ void PaxosImpl::handle_proposals() {
     auto self_id = view.self_id;
     c.first->epoch = view.epoch;
     c.first->id = inst_id;
-    auto str = c.second;
+    auto strs = c.second;
     std::atomic<uint32_t> counter;
     std::atomic<uint32_t> finished;
     counter.store(1, std::memory_order_release);
@@ -129,10 +181,10 @@ void PaxosImpl::handle_proposals() {
             invoker.second->
               commit(view.epoch,
                      view.self_id,
-                     inst_id,
-                     &*str);
+                     {inst_id},
+                     *strs);
           finished.fetch_add(1, std::memory_order_release);
-          if (commit_result.result() == PaxosMsg::SUCCESS)
+          if (commit_result[0].result() == PaxosMsg::SUCCESS)
             counter.fetch_add(1, std::memory_order_release);
         });
         fbs.push_back(std::move(f));
@@ -143,7 +195,7 @@ void PaxosImpl::handle_proposals() {
     if (result.second) {
       result.first->second.promised_epoch = view.epoch;
       result.first->second.status = PREPARED;
-      result.first->second.value = new std::string(*c.second);
+      result.first->second.value = (*c.second)[0];
       auto quorum_size = (view.vm.size() + 1) / 2;
 
       while (true) {
@@ -171,8 +223,8 @@ void PaxosImpl::handle_proposals() {
             invoker.second->
               learn(epoch,
                     self_id,
-                    inst_id,
-                    &*str);
+                    {inst_id},
+                    *strs);
             }).detach();
         }
       }
@@ -229,25 +281,30 @@ PaxosImpl::init(PaxosView&& view_, PaxosConfig&& config_) {
 
 Status
 PaxosImpl::propose(grpc::ServerContext* context,
-                   const PaxosMsg* request,
-                   PaxosMsg* result) {
+                   grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) {
+  PaxosMsg request, reply;
   if (view.leader_id != view.self_id) {
-    result->set_result(PaxosMsg::FAILURE);
+    reply.set_result(PaxosMsg::FAILURE);
+    reply.set_node_id(view.leader_id);
+    reply.set_epoch(view.epoch);
+    stream->Write(reply);
     return Status::OK;
   }
-  while (!context->IsCancelled()) {
-    auto token = this->async_propose(request->value());
-    while (!token->is_finished()) {
-      std::this_thread::yield();
-      if (context->IsCancelled())
-        break;
+  if (!context->IsCancelled()) {
+    std::vector<std::shared_ptr<ProposeToken>> tokens;
+    while (stream->Read(&request)) {
+      tokens.push_back(async_propose(request.value()));
     }
-    if (token->is_finished() &&
-        token->get_result()) {
-      result->set_result(PaxosMsg::SUCCESS);
-      return Status::OK;
-    } else
-      result->set_result(PaxosMsg::FAILURE);
+    for (auto &token : tokens) {
+      token->wait();
+      if (token->get_result()) {
+        reply.set_result(PaxosMsg::SUCCESS);
+      } else {
+        reply.set_result(PaxosMsg::FAILURE);
+      }
+      stream->Write(reply);
+    }
+    return Status::OK;
   }
   return Status::CANCELLED;
 }
@@ -255,50 +312,45 @@ PaxosImpl::propose(grpc::ServerContext* context,
 
 Status
 PaxosImpl::commit(grpc::ServerContext* context,
-                  const PaxosMsg* request,
-                  PaxosMsg* response) {
+              grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) {
   if (context->IsCancelled()) {
     return Status::CANCELLED;
   }
-  auto request_epoch = request->epoch();
-  auto request_instance_id = request->instance_id();
+  PaxosMsg request, reply;
   mtx.lock();
-  // should consider if the node never
-  // sees the prepare from new leader
-  if (request_epoch >= view.epoch) {
-    if (request_epoch > view.epoch) {
-      view.epoch = request_epoch;
-      view.leader_id = request->node_id();
-    }
-    auto record = PaxosRecord(PREPARED, request_epoch, nullptr);
-    auto kv_pair = std::make_pair(request_instance_id, record);
-    auto inst_res = records.insert(kv_pair);
-    response->set_result(PaxosMsg::SUCCESS);
-    if (inst_res.second) {
-      if (request->value().length() != 0) {
-        auto value = new string(request->value());
-        inst_res.first->second.value = value;
+  while (stream->Read(&request)) {
+    auto request_epoch = request.epoch();
+    auto request_instance_id = request.instance_id();
+    auto &request_value = request.value();
+    // should consider if the node never
+    // sees the prepare from new leader
+    if (request_epoch >= view.epoch) {
+      if (request_epoch > view.epoch) {
+        view.epoch = request_epoch;
+        view.leader_id = request.node_id();
       }
-    } else {
-      if (inst_res.first->second.status == LEARNED) {
-        response->set_result(PaxosMsg::CONFLICT);
-        goto commit_out;
-      }
-      inst_res.first->second.promised_epoch = kv_pair.second.promised_epoch;
-      if (request->value().length() != 0) {
-        if (inst_res.first->second.value == nullptr ||
-            !bytes_eq(*inst_res.first->second.value, request->value())) {
-          if (inst_res.first->second.value != nullptr)
-            delete inst_res.first->second.value;
-          string* value = new string;
-          *value = request->value();
-          inst_res.first->second.value = value;
+      auto record = PaxosRecord(PREPARED, request_epoch, string());
+      auto kv_pair = std::make_pair(request_instance_id, record);
+      auto inst_res = records.insert(kv_pair);
+      reply.set_result(PaxosMsg::SUCCESS);
+      if (inst_res.second) {
+          inst_res.first->second.value = request_value;
+      } else {
+        if (inst_res.first->second.status == LEARNED) {
+          reply.set_result(PaxosMsg::CONFLICT);
+        }
+        inst_res.first->second.promised_epoch = kv_pair.second.promised_epoch;
+        if (!bytes_eq(inst_res.first->second.value, request_value)) {
+          inst_res.first->second.value = request_value;
         }
       }
+    } else {
+      reply.set_result(PaxosMsg::FOLLOWUP);
+      reply.set_node_id(view.leader_id);
+      std::cout << "???" << std::endl;
+      goto commit_out;
     }
-  } else {
-    response->set_result(PaxosMsg::FOLLOWUP);
-    response->set_node_id(view.leader_id);
+    stream->Write(reply);
   }
 commit_out:
   mtx.unlock();
@@ -307,43 +359,38 @@ commit_out:
 
 Status
 PaxosImpl::learn(grpc::ServerContext* context,
-                 const PaxosMsg* request,
-                 PaxosMsg* response) {
-  auto request_epoch = request->instance_id();
-  auto request_instance_id = request->instance_id();
-  auto record = PaxosRecord(LEARNED, 0, nullptr);
-  auto kv_pair = std::make_pair(request_instance_id, record);
+              grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) {
+  if (context->IsCancelled()) {
+    return Status::CANCELLED;
+  }
+  PaxosMsg request, reply;
   mtx.lock();
-  auto inst_res = records.insert(kv_pair);
-  response->set_result(PaxosMsg::SUCCESS);
-  if (inst_res.second) {
-    if (request->value().length() != 0) {
-      auto value = new string;
-      *value = request->value();
-      inst_res.first->second.value = value;
-    }
-  } else {
-    if (inst_res.first->second.status == LEARNED) {
-      if (inst_res.first->second.value == nullptr) {
-        if (request->value().length() != 0)
-          response->set_result(PaxosMsg::CONFLICT);
-      } else if (!bytes_eq(*inst_res.first->second.value, request->value()))
-        response->set_result(PaxosMsg::CONFLICT);
-      goto learn_out;
+  while (stream->Read(&request)) {
+    auto request_epoch = request.epoch();
+    auto request_instance_id = request.instance_id();
+    auto &request_value = request.value();
+    auto record = PaxosRecord(LEARNED, 0, string());
+    auto kv_pair = std::make_pair(request_instance_id, record);
+    auto inst_res = records.insert(kv_pair);
+    reply.set_result(PaxosMsg::SUCCESS);
+    if (inst_res.second) {
+      if (request_value.length() != 0) {
+        inst_res.first->second.value = request_value;
+      }
     } else {
-      inst_res.first->second.status = LEARNED;
-      inst_res.first->second.promised_epoch = request_epoch;
-      if (request->value().length() != 0) {
-        if (inst_res.first->second.value == nullptr ||
-            !bytes_eq(*inst_res.first->second.value, request->value())) {
-          if (inst_res.first->second.value != nullptr)
-            delete inst_res.first->second.value;
-          string* value = new string;
-          *value = request->value();
-          inst_res.first->second.value = value;
-        }
+      if (inst_res.first->second.status == LEARNED) {
+        if (!bytes_eq(inst_res.first->second.value, request_value))
+          reply.set_result(PaxosMsg::CONFLICT);
+        stream->Write(reply);
+        continue;
+      } else {
+        inst_res.first->second.status = LEARNED;
+        inst_res.first->second.promised_epoch = request_epoch;
+        if (!bytes_eq(inst_res.first->second.value, request_value))
+          inst_res.first->second.value = request_value;
       }
     }
+    stream->Write(reply);
   }
 learn_out:
   mtx.unlock();
@@ -385,7 +432,8 @@ PaxosImpl::get_vote(grpc::ServerContext* context,
 
 std::shared_ptr<ProposeToken>
 PaxosImpl::async_propose(const string& value) {
-  auto c = std::shared_ptr<string>(new string(value));
+  std::vector<string> values = {value};
+  auto c = std::make_shared<std::vector<string>>(std::move(values));
   auto token = std::shared_ptr<ProposeToken>(new ProposeToken());
   command_chan.push(std::make_pair(token, c));
   return token;

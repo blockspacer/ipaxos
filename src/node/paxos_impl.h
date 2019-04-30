@@ -6,6 +6,7 @@
 #include <utility>
 #include <memory>
 #include <boost/fiber/all.hpp>
+#include <boost/thread/thread.hpp>
 #include <tbb/concurrent_queue.h>
 
 
@@ -50,7 +51,7 @@ class PaxosImpl;
 
 typedef std::pair<
           std::shared_ptr<ProposeToken>,
-          std::shared_ptr<std::string>> CommandT;
+          std::shared_ptr<std::vector<std::string>>> CommandT;
 typedef tbb::concurrent_queue<CommandT> PaxosChanT;
 
 // Use Acquire-Release ordering to sysnchronize
@@ -134,15 +135,15 @@ public:
   PaxosInvoker(std::shared_ptr<Channel> channel)
     : stub_(Paxos::NewStub(channel)) {}
 
-  PaxosMsg commit(EpochT epoch, NodeIDT node_id,
-                  InstanceIDT instance_id,
-                  const std::string* value);
+  std::vector<PaxosMsg> commit(EpochT epoch, NodeIDT node_id,
+                  std::vector<InstanceIDT> instance_id,
+                  const std::vector<std::string>& value);
 
-  PaxosMsg learn(EpochT epoch, NodeIDT node_id,
-                 InstanceIDT instance_id,
-                 const std::string* value);
+  std::vector<PaxosMsg> learn(EpochT epoch, NodeIDT node_id,
+                 std::vector<InstanceIDT> instance_id,
+                 const std::vector<std::string>& value);
 
-  PaxosMsg propose(const std::string& value);
+  std::vector<PaxosMsg> propose(const std::vector<std::string>& value);
 
   PaxosMsg get_vote(EpochT epoch, NodeIDT node_id);
 
@@ -158,17 +159,15 @@ public:
   bool init(PaxosView&& view, PaxosConfig&& config);
   void init_invokers();
   std::shared_ptr<ProposeToken> async_propose(const std::string &);
-  // std::pair<EpochT, InstanceIDT> forward_propose(const std::string &);
+  // std::shared_ptr<ProposeToken> async_propose(const std::vector<std::string> &);
 
   inline bool is_leader() { return view.self_id == view.leader_id; };
   Status commit(grpc::ServerContext* context,
-                const PaxosMsg* request,
-                PaxosMsg* response) override;
+                grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) override;
 
   // learn always succeeds
   Status learn(grpc::ServerContext* context,
-               const PaxosMsg* request,
-               PaxosMsg* response) override;
+                grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) override;
 
   // start leader election
   Status get_vote(grpc::ServerContext* context,
@@ -177,8 +176,7 @@ public:
 
 
   Status propose(grpc::ServerContext* context,
-                 const PaxosMsg* request,
-                 PaxosMsg* result) override;
+                grpc::ServerReaderWriter<PaxosMsg, PaxosMsg>* stream) override;
 
   // true if become leader
   // either way, returns when stable state is reached
@@ -193,7 +191,7 @@ public:
   void debug_print() {
     mtx.lock();
     for (auto& v : records) {
-      std::cout << v.first << " : " << *v.second.value << " : "
+      std::cout << v.first << " : " << v.second.value << " : "
         << v.second.status << std::endl;
     }
     mtx.unlock();
@@ -205,20 +203,17 @@ private:
     friend class PaxosImpl;
     PaxosRecord() = default;
     PaxosRecord(InstanceStatus status, EpochT epoch,
-           std::string* value = nullptr) :
+           const std::string& value) :
            status(status),
            promised_epoch(epoch),
            value(value) {}
     ~PaxosRecord() {
-      if (value != nullptr) {
-        delete value;
-      }
     }
 
   private:
       InstanceStatus status = EMPTY;
       EpochT promised_epoch = 0;
-      std::string* value = nullptr;
+      std::string value;
   };
 
   // proposing loop
