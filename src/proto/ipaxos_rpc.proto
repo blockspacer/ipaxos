@@ -8,7 +8,7 @@ service Paxos
   rpc learn (stream PaxosMsg) returns (stream PaxosMsg) {}
   rpc get_vote (PaxosMsg) returns (PaxosMsg) {}
   // i.e. prepare
-  rpc ask_follow (PaxosMsg) returns (PaxosMsg) {}
+  rpc ask_follow (PaxosMsg) returns (stream PaxosMsg) {}
   rpc propose (stream PaxosMsg) returns (stream PaxosMsg) {}
 }
 
@@ -18,13 +18,15 @@ message PaxosMsg
   uint64 epoch = 2;
   uint64 instance_id = 3;
   uint64 last_commit_id = 4;
-  bytes value = 5;
-  repeated uint64 ranges = 6;
+  bool val_learned = 5; // only used on ask_follow
+  bytes value = 6;
+  repeated uint64 ranges = 7;
   enum Result {
     SUCCESS = 0;
     CONFLICT = 1; // hint the value already learned
     FOLLOWUP = 2; // hint to follow up
-    FAILURE = 3; // vote fail
+    REQUIRE = 3; // ask for records
+    FAILURE = 4; // vote fail
   }
-  Result result = 7;
+  Result result = 8;
 }

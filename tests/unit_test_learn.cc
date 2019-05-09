@@ -25,6 +25,8 @@ int main()
   {
     nodes[i].init_invokers();
   }
+  // nodes[1].debug_request_leader();
+  // std::cout << "change leader" << std::endl;
 
 
   auto thread_count = std::thread::hardware_concurrency();
@@ -51,6 +53,11 @@ int main()
   pool.join();
 
 
+  auto a = nodes[0].debug_record();
+  auto b = nodes[1].debug_record();
+  auto c = nodes[2].debug_record();
+  for (auto& kv:a)
+    assert(c[kv.first] == b[kv.first] && c[kv.first] == kv.second);
   for (int i = 0;i < 3;++i) {
     std::cout << "print node " << i << std::endl;
     // nodes[i].debug_print();

@@ -96,6 +96,7 @@ include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_library(paxos_node SHARED
   "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_node.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_impl.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/node/paxos_invoker.cc"
   ${hw_proto_srcs}
   ${hw_grpc_srcs})
 target_link_libraries(paxos_node

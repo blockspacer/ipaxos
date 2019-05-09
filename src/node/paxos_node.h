@@ -31,6 +31,10 @@ public:
     impl.debug_print();
   }
 
+  std::map<InstanceIDT, PaxosImpl::PaxosRecord> debug_record() {
+    return impl.debug_record();
+  }
+
   void debug_request_leader() {
     impl.debug_request_leader();
   }
