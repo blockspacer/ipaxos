@@ -11,8 +11,8 @@ PaxosInvoker::propose(const std::vector<std::string>& value) {
   PaxosMsg request, reply;
   auto* replies = new std::vector<PaxosMsg>();
   ClientContext context;
-  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT * 4);
-  context.set_deadline(deadline);
+  //auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT * 4);
+  //context.set_deadline(deadline);
   // auto now = std::chrono::system_clock::now();
   auto stream = stub_->propose(&context);
 
@@ -60,8 +60,8 @@ PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
   request.set_node_id(node_id);
 
   ClientContext context;
-  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
-  context.set_deadline(deadline);
+  //auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
+  //context.set_deadline(deadline);
   auto stream = stub_->commit(&context);
 
   //auto t = boost::thread([&](){
@@ -111,8 +111,8 @@ PaxosInvoker::learn(EpochT epoch, NodeIDT node_id,
   request.set_node_id(node_id);
 
   ClientContext context;
-  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_LEARN_TIMEOUT);
-  context.set_deadline(deadline);
+  // auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_LEARN_TIMEOUT);
+  // context.set_deadline(deadline);
   auto stream = stub_->learn(&context);
 
   //auto writer = boost::thread([&](){
@@ -156,8 +156,8 @@ PaxosInvoker::get_vote(EpochT epoch, NodeIDT node_id) {
   request.set_epoch(epoch);
   request.set_node_id(node_id);
   ClientContext context;
-  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_VOTE_TIMEOUT);
-  context.set_deadline(deadline);
+  //auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_VOTE_TIMEOUT);
+  //context.set_deadline(deadline);
   Status status = stub_->get_vote(&context, request, &reply);
 
   if (status.ok()) {
@@ -181,7 +181,7 @@ PaxosInvoker::ask_follow(EpochT epoch, NodeIDT node_id,
   PaxosMsg request, reply;
   auto replies = new std::vector<PaxosMsg>();
   ClientContext context;
-  auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
+  // auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
   request.set_epoch(epoch);
   request.set_node_id(node_id);
   for (auto& r: ranges)

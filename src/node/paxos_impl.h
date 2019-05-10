@@ -224,15 +224,16 @@ public:
                     grpc::ServerWriter<PaxosMsg>* writer) override;
 
 
-  // true if become leader
-  // either way, returns when stable state is reached
-  bool try_leader_election();
 
   inline bool has_valid_leader() {
     return leader_valid.load(std::memory_order_acquire);
   }
 
-  void debug_request_leader();
+  // true if become leader
+  bool request_for_leader();
+
+  // loop for stable leader
+  void leader_election();
 
   std::map<InstanceIDT, PaxosRecord> debug_record() {
     mtx.lock();
@@ -314,7 +315,7 @@ private:
   std::atomic<bool> leader_valid;
   std::atomic<bool> running_for_leader;
 
-  uint32_t vote_timeout;
+  uint32_t lease_timeout;
 
   // record largest voted epoch
   EpochT voted_epoch = 0;

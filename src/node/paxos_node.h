@@ -36,7 +36,7 @@ public:
   }
 
   void debug_request_leader() {
-    impl.debug_request_leader();
+    impl.request_for_leader();
   }
 
   inline bool is_leader() { return impl.is_leader(); }

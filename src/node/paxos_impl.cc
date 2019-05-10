@@ -4,25 +4,40 @@
 
 void PaxosImpl::handle_proposals() {
   while (true) {
+event_handler_start:
     CommandT c;
     while (!command_chan.try_pop(c)) {}
 
-    while (!has_valid_leader()) {}
-    if (view.self_role != LEADER) {
-      // if not leader, forward to leader
-      invokers[view.leader_id]->propose(*c.second);
-      c.first->finish_propose(true);
-      continue;
+leader_check:
+    while (true) {
+      if (!has_valid_leader()) {
+        leader_election();
+        continue;
+      }
+      if (view.self_role != LEADER) {
+        // if not leader, forward to leader
+        auto result = invokers[view.leader_id]->propose(*c.second);
+        if (result.first) {
+          c.first->finish_propose(true);
+          goto event_handler_start;
+        } else {
+          leader_valid.store(false, std::memory_order_release);
+          continue;
+        }
+      } else
+        break;
     }
 
     mtx.lock();
-    while (!has_valid_leader()) {
+    if (!has_valid_leader()) {
       std::cout << "not valid detected" << std::endl;
       mtx.unlock();
-      while (!has_valid_leader())
-        boost::this_fiber::yield();
-      mtx.lock();
+      goto leader_check;
     }
+
+    if (view.self_id != view.leader_id)
+      goto leader_check;
+
     // if I'm leader
     auto inst_id = next_id++;
     auto epoch = view.epoch;
@@ -36,7 +51,7 @@ void PaxosImpl::handle_proposals() {
     finished.store(1, std::memory_order_release);
     std::vector<Collect<std::vector<PaxosMsg>>> collects(view.vm.size() - 1);
     uint64_t indexer = 0;
-    // TODO: batching
+    // TODO: batching : do batching
     for (auto &invoker: invokers) {
       if (invoker.first != view.self_id) {
         auto index = indexer++;
@@ -80,6 +95,7 @@ void PaxosImpl::handle_proposals() {
       }
 
       if (counter.load(std::memory_order_acquire) < quorum_size) {
+        // TODO: batching : calculate count for every inst
         for (auto &collect : collects) {
           if (collect.has_value()) {
             if (collect->at(0).result() == PaxosMsg::FOLLOWUP) {
@@ -107,7 +123,7 @@ void PaxosImpl::handle_proposals() {
             }).detach();
         }
       }
-      // TODO: persistent learned result
+      // TODO: persistent : write down learned result
       records[inst_id].status = LEARNED;
       boost::this_fiber::yield();
       c.first->finish_propose(true);
@@ -216,7 +232,7 @@ PaxosImpl::init(PaxosView&& view_, PaxosConfig&& config_) {
   // Choose a random vote timeout
   std::default_random_engine e1(r());
   std::uniform_int_distribution<int> uniform_dist(PAXOS_RANDOM_WAIT_LOW, PAXOS_RANDOM_WAIT_HIGH);
-  vote_timeout = uniform_dist(e1);
+  lease_timeout = uniform_dist(e1);
   _waiting_handler = std::thread([=]() {
     ServerBuilder builder;
     builder.AddListeningPort(view.vm[view.self_id], grpc::InsecureServerCredentials());
@@ -304,7 +320,7 @@ PaxosImpl::commit(grpc::ServerContext* context,
           inst_res.first->second.value = request_value;
         }
       }
-      // TODO: persistent commit result
+      // TODO: persistent : write down commit result
     } else {
       reply.set_result(PaxosMsg::FOLLOWUP);
       reply.set_epoch(view.epoch);
@@ -414,11 +430,9 @@ PaxosImpl::ask_follow(grpc::ServerContext* context,
     return Status::CANCELLED;
   PaxosMsg reply;
 
-  if (request->epoch() >= view.epoch) {
-    leader_valid.store(false, std::memory_order_release);
-  }
   mtx.lock();
   if (request->epoch() >= view.epoch) {
+    leader_valid.store(true, std::memory_order_release);
     view.epoch = request->epoch();
     view.leader_id = request->node_id();
     view.self_role = FOLLOWER;
@@ -460,7 +474,6 @@ PaxosImpl::ask_follow(grpc::ServerContext* context,
     reply.set_result(PaxosMsg::FAILURE);
     writer->Write(reply);
   }
-  leader_valid.store(true, std::memory_order_release);
   mtx.unlock();
 
   return Status::OK;
@@ -475,15 +488,15 @@ PaxosImpl::async_propose(const string& value) {
   return token;
 }
 
-void
-PaxosImpl::debug_request_leader() {
+bool
+PaxosImpl::request_for_leader() {
   mtx.lock();
   running_for_leader.store(true, std::memory_order_release);
   if (leader_valid.load(std::memory_order_acquire) &&
       view.self_id == view.leader_id) {
     mtx.unlock();
     running_for_leader.store(false, std::memory_order_release);
-    return;
+    return false;
   }
   leader_valid.store(false, std::memory_order_release);
   view.self_role = CANDIDATE;
@@ -521,7 +534,7 @@ PaxosImpl::debug_request_leader() {
   if (counter.load(std::memory_order_acquire) < quorum_size) {
     std::cout << "request_leader failure" << std::endl;
     running_for_leader.store(false, std::memory_order_release);
-    return;
+    return false;
   }
 
   // if success
@@ -536,7 +549,7 @@ PaxosImpl::debug_request_leader() {
   auto learned_ranges = get_learned_ranges();
   std::vector<Collect<std::vector<PaxosMsg>>> collects(view.vm.size() - 1);
   std::vector<std::vector<uint64_t>> require_ranges(view.vm.size() - 1);
-  // TODO: collect all result
+
   for (auto &invoker: invokers) {
     if (invoker.first != view.self_id) {
       auto index = indexer++;
@@ -574,9 +587,9 @@ PaxosImpl::debug_request_leader() {
           view.leader_id = iter->node_id();
           view.epoch = iter->epoch();
           view.self_role = FOLLOWER;
-          mtx.unlock();
           running_for_leader.store(false, std::memory_order_release);
-          return;
+          mtx.unlock();
+          return false;
         }
       } else {
         while (iter != collect->end() &&
@@ -620,7 +633,7 @@ PaxosImpl::debug_request_leader() {
     }
   }
 
-  // TODO: persistent
+  // TODO: persistent : write down
   // finish commit
   finished.store(1, std::memory_order_release);
   std::vector<InstanceIDT> inst_ids;
@@ -660,6 +673,7 @@ PaxosImpl::debug_request_leader() {
     }
 
     int count = 0;
+    // TODO: batching : calculate count for every inst
     for (auto &collect:collects2) {
       auto &msg = collect->at(0);
       if (msg.result() == PaxosMsg::SUCCESS)
@@ -671,7 +685,7 @@ PaxosImpl::debug_request_leader() {
           view.self_role = FOLLOWER;
           mtx.unlock();
           running_for_leader.store(false, std::memory_order_release);
-          return;
+          return false;
         }
       } else
         abort();
@@ -681,7 +695,7 @@ PaxosImpl::debug_request_leader() {
       // TODO update fail
       mtx.unlock();
       running_for_leader.store(false, std::memory_order_release);
-      return;
+      return false;
     }
   }
 
@@ -722,5 +736,17 @@ PaxosImpl::debug_request_leader() {
 
   mtx.unlock();
   running_for_leader.store(false, std::memory_order_release);
-  return;
+  return true;
+}
+
+void
+PaxosImpl::leader_election() {
+  int coef = 1;
+  while (!has_valid_leader()) {
+    auto result = request_for_leader();
+    if (result)
+      return;
+    boost::this_fiber::sleep_for(std::chrono::milliseconds(coef * lease_timeout));
+    coef = coef == 8 ? coef : coef * 2;
+  }
 }
