@@ -10,11 +10,7 @@ set (CMAKE_EXPORT_COMPILE_COMMANDS 1)
 #unset(CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES)
 #include_directories("/usr/include")
 
-if(NOT MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -ltbb")
-else()
-  add_definitions(-D_WIN32_WINNT=0x600)
-endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -ltbb")
 
 if(GRPC_AS_SUBMODULE)
   # One way to build a projects that uses gRPC is to just include the

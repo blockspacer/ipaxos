@@ -16,12 +16,14 @@ PaxosInvoker::propose(const std::vector<std::string>& value) {
   // auto now = std::chrono::system_clock::now();
   auto stream = stub_->propose(&context);
 
+  auto counter = 0;
+
   // auto t = boost::thread([&](){
-    for (auto &s: value) {
-      request.set_value(s);
-      stream->Write(request);
-    }
-    stream->WritesDone();
+  for (auto &s: value) {
+    request.set_value(s);
+    stream->Write(request);
+  }
+  stream->WritesDone();
   // });
 
   while (stream->Read(&reply)) {
@@ -46,7 +48,8 @@ PaxosInvoker::propose(const std::vector<std::string>& value) {
 std::pair<bool, std::shared_ptr<std::vector<PaxosMsg>>>
 PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
                            std::vector<InstanceIDT> instance_id,
-                           const std::vector<std::string>& value) {
+                           const std::vector<std::string>& value,
+                           bool compact_and_check) {
   if (!check_state()) {
     return std::make_pair(false, nullptr);
   }
@@ -58,6 +61,7 @@ PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
   auto replies = new std::vector<PaxosMsg>();
   request.set_epoch(epoch);
   request.set_node_id(node_id);
+  request.set_compact_and_check(compact_and_check);
 
   ClientContext context;
   //auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(PAXOS_COMMIT_TIMEOUT);
@@ -76,6 +80,11 @@ PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
   // });
 
   for (auto &s: value) {
+    stream->Read(&reply);
+    replies->push_back(reply);
+  }
+
+  if (compact_and_check) {
     stream->Read(&reply);
     replies->push_back(reply);
   }
@@ -126,13 +135,13 @@ PaxosInvoker::learn(EpochT epoch, NodeIDT node_id,
 
     stream->WritesDone();
   // });
+  // writer.join();
 
   for (auto &s: value) {
     stream->Read(&reply);
     replies->push_back(reply);
   }
-  // writer.join();
-
+  
   auto status = stream->Finish();
 
   if (status.ok()) {

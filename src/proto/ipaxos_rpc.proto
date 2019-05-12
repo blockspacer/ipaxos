@@ -17,16 +17,20 @@ message PaxosMsg
   uint64 node_id = 1;
   uint64 epoch = 2;
   uint64 instance_id = 3;
-  uint64 last_commit_id = 4;
-  bool val_learned = 5; // only used on ask_follow
-  bytes value = 6;
-  repeated uint64 ranges = 7;
+  bool val_learned = 4; // only used on ask_follow
+  bytes value = 5;
+  repeated uint64 ranges = 6;
   enum Result {
     SUCCESS = 0;
     CONFLICT = 1; // hint the value already learned
     FOLLOWUP = 2; // hint to follow up
     REQUIRE = 3; // ask for records
     FAILURE = 4; // vote fail
+    // result of successive learned ranges
+    // stored in *ranges*
+    SUCCESSIVE = 5;
   }
-  Result result = 8;
+  Result result = 7;
+  uint64 successive_learned = 8;
+  bool compact_and_check = 9;
 }

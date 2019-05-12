@@ -15,8 +15,12 @@
 #define PAXOS_LEARN_TIMEOUT 600
 #define PAXOS_CONNECTION_CHECK_TIMEOUT 10
 
+#define PAXOS_COMPACT_INTERVAL 20
+
 #define PAXOS_RANDOM_WAIT_LOW 150
 #define PAXOS_RANDOM_WAIT_HIGH 300
+
+#define PAXOS_BATCH_SIZE 50
 
 using ipaxos::Paxos;
 using ipaxos::PaxosMsg;
@@ -52,7 +56,7 @@ class PaxosInvoker;
 class PaxosImpl;
 
 typedef std::pair<
-          std::shared_ptr<ProposeToken>,
+          std::vector<std::shared_ptr<ProposeToken>>,
           std::shared_ptr<std::vector<std::string>>> CommandT;
 typedef tbb::concurrent_queue<CommandT> PaxosChanT;
 
@@ -142,7 +146,8 @@ public:
   std::pair<bool, std::shared_ptr<std::vector<PaxosMsg>>>
   commit(EpochT epoch, NodeIDT node_id,
          std::vector<InstanceIDT> instance_id,
-         const std::vector<std::string>& value);
+         const std::vector<std::string>& value,
+         bool compact_and_check = false);
 
   std::pair<bool, std::shared_ptr<std::vector<PaxosMsg>>>
   learn(EpochT epoch, NodeIDT node_id,
@@ -276,7 +281,10 @@ private:
     friend class PaxosImpl;
   public:
     PaxosLearnedIndex() = default;
-    PaxosLearnedIndex(const PaxosRecord&) = delete;
+    PaxosLearnedIndex(const PaxosRecord& record) {
+      value = new std::string;
+      *value = record.value;
+    }
     PaxosLearnedIndex(PaxosRecord&& record) {
       value = new std::string;
       std::swap(record.value, *value);
@@ -299,6 +307,7 @@ private:
   void handle_proposals();
   std::vector<InstanceIDT> get_learned_ranges();
   std::vector<InstanceIDT> get_known_ranges();
+  InstanceIDT compact();
 
   boost::fibers::mutex mtx;
 
