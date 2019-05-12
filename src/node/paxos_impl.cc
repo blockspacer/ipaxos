@@ -3,7 +3,10 @@
 #include "../common/collect.h"
 
 void PaxosImpl::handle_proposals() {
-  auto compact_checkpoint = std::chrono::system_clock::now() + std::chrono::seconds(PAXOS_COMPACT_INTERVAL);
+  auto compact_checkpoint =
+    std::chrono::system_clock::now() +
+    std::chrono::seconds(config.compact_interval());
+
   std::vector<std::shared_ptr<ProposeToken>> tokens;
   std::vector<std::string> values;
   auto inst_ids = std::vector<InstanceIDT>();
@@ -17,15 +20,24 @@ event_handler_start:
 
     while (!command_chan.try_pop(c)) {}
 
-    std::move(c.first.begin(), c.first.end(), std::back_inserter(tokens));
-    std::move(c.second->begin(), c.second->end(), std::back_inserter(values));
+    std::move(c.first.begin(),
+              c.first.end(),
+              std::back_inserter(tokens));
+
+    std::move(c.second->begin(),
+              c.second->end(),
+              std::back_inserter(values));
 
     auto batch_size = c.second->size();
-    while (batch_size < PAXOS_BATCH_SIZE &&
+    while (batch_size < config.batch_size() &&
         command_chan.try_pop(c)) {
       batch_size += c.second->size();
-      std::move(c.first.begin(), c.first.end(), std::back_inserter(tokens));
-      std::move(c.second->begin(), c.second->end(), std::back_inserter(values));
+      std::move(c.first.begin(),
+                c.first.end(),
+                std::back_inserter(tokens));
+      std::move(c.second->begin(),
+                c.second->end(),
+                std::back_inserter(values));
     }
 
 
@@ -70,7 +82,8 @@ leader_check:
     bool leader_change = false;
 
     if (compact_and_check) {
-      compact_checkpoint = now + std::chrono::seconds(PAXOS_COMPACT_INTERVAL);
+      compact_checkpoint = now +
+          std::chrono::seconds(config.compact_interval());
     }
 
     auto epoch = view.epoch;
@@ -292,7 +305,8 @@ PaxosImpl::init_invokers() {
       auto invoker = new PaxosInvoker(
           grpc::CreateChannel(
             v.second,
-            grpc::InsecureChannelCredentials()));
+            grpc::InsecureChannelCredentials()),
+          config.connection_check_timeout());
       invokers.insert({v.first, invoker});
     }
   }
@@ -309,16 +323,26 @@ PaxosImpl::init(PaxosView&& view_, PaxosConfig&& config_) {
 
   // Choose a random vote timeout
   std::default_random_engine e1(r());
-  std::uniform_int_distribution<int> uniform_dist(PAXOS_RANDOM_WAIT_LOW, PAXOS_RANDOM_WAIT_HIGH);
+
+  std::uniform_int_distribution<int>
+    uniform_dist(config.random_wait_low(),
+                 config.random_wait_high());
+
   lease_timeout = uniform_dist(e1);
+
   _waiting_handler = std::thread([=]() {
     ServerBuilder builder;
-    builder.AddListeningPort(view.vm[view.self_id], grpc::InsecureServerCredentials());
+    builder.AddListeningPort(
+        view.vm[view.self_id],
+        grpc::InsecureServerCredentials());
+
     builder.RegisterService(this);
     auto service = std::move(builder.BuildAndStart());
     service->Wait();
   });
-  _receiving_handler = std::thread(std::bind(&PaxosImpl::handle_proposals, this));
+
+  _receiving_handler =
+    std::thread(std::bind(&PaxosImpl::handle_proposals, this));
   return true;
 }
 

@@ -2,25 +2,13 @@
 #define _PAXOS_IMPL_H_
 #include <thread>
 #include <grpcpp/grpcpp.h>
+#include "node/paxos_config.h"
 #include "ipaxos_rpc.grpc.pb.h"
 #include <utility>
 #include <memory>
 #include <boost/fiber/all.hpp>
 #include <boost/thread/thread.hpp>
 #include <tbb/concurrent_queue.h>
-
-
-#define PAXOS_COMMIT_TIMEOUT 600
-#define PAXOS_VOTE_TIMEOUT 600
-#define PAXOS_LEARN_TIMEOUT 600
-#define PAXOS_CONNECTION_CHECK_TIMEOUT 10
-
-#define PAXOS_COMPACT_INTERVAL 20
-
-#define PAXOS_RANDOM_WAIT_LOW 150
-#define PAXOS_RANDOM_WAIT_HIGH 300
-
-#define PAXOS_BATCH_SIZE 50
 
 using ipaxos::Paxos;
 using ipaxos::PaxosMsg;
@@ -50,7 +38,6 @@ typedef uint64_t EpochT;
 
 
 class ProposeToken;
-class PaxosConfig;
 class PaxosView;
 class PaxosInvoker;
 class PaxosImpl;
@@ -97,19 +84,6 @@ private:
   std::atomic<bool> finish;
 };
 
-
-
-class PaxosConfig {
-public:
-  inline void set_batch_interval(uint32_t t) {
-    batch_interval_ = t;
-  }
-  inline uint32_t batch_interval() { return batch_interval_; }
-private:
-  // batch interval
-  uint32_t batch_interval_ = 100;
-};
-
 class PaxosView {
 public:
   PaxosView() = default;
@@ -137,10 +111,12 @@ public:
 
 class PaxosInvoker {
 public:
-  PaxosInvoker(std::shared_ptr<Channel> channel)
-    : stub_(Paxos::NewStub(channel)) {
+  PaxosInvoker(std::shared_ptr<Channel> channel,
+               uint32_t timeout)
+    : stub_(Paxos::NewStub(channel)),
+      connection_check_timeout(timeout) {
       chan_ = channel;
-    check_point = std::chrono::system_clock::now() + std::chrono::seconds(PAXOS_CONNECTION_CHECK_TIMEOUT);
+    check_point = std::chrono::system_clock::now() + std::chrono::seconds(connection_check_timeout);
   }
 
   std::pair<bool, std::shared_ptr<std::vector<PaxosMsg>>>
@@ -167,7 +143,7 @@ private:
   inline bool check_state() {
     auto now = std::chrono::system_clock::now();
     if (now > check_point) {
-      check_point = now + std::chrono::seconds(PAXOS_CONNECTION_CHECK_TIMEOUT);
+      check_point = now + std::chrono::seconds(connection_check_timeout);
       return do_check_state();
     } else
       return online;
@@ -175,7 +151,7 @@ private:
 
   inline bool do_check_state() {
     auto state = chan_->GetState(true);
-    check_point = std::chrono::system_clock::now() + std::chrono::seconds(PAXOS_CONNECTION_CHECK_TIMEOUT);
+    check_point = std::chrono::system_clock::now() + std::chrono::seconds(connection_check_timeout);
     if (state == GRPC_CHANNEL_READY || state == GRPC_CHANNEL_IDLE) {
       online = true;
       return true;
@@ -187,6 +163,7 @@ private:
 
 
   std::chrono::time_point<std::chrono::system_clock> check_point;
+  uint32_t connection_check_timeout = 0xFFFFFFF;
   bool online = true;
   std::shared_ptr<ChannelInterface> chan_;
   std::unique_ptr<Paxos::Stub> stub_;
@@ -245,7 +222,7 @@ public:
     return records;
     mtx.unlock();
   }
-  
+
   void debug_print() {
     mtx.lock();
     for (auto& v : records) {
