@@ -23,6 +23,10 @@ public:
 
   void init_invokers() { impl.init_invokers(); };
 
+  void stop() {
+    impl.stop();
+  }
+
 
   std::shared_ptr<ProposeToken> async_propose(const string& value);
   bool propose(const string& value);

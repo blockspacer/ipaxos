@@ -2,8 +2,8 @@
 
 bool PaxosNode::propose(const string& value) {
   auto token = async_propose(value);
-  while (!token->is_finished()) {};
-  return token->get_result();
+  while (!token->paxos_commit_finished()) {};
+  return token->get_paxos_commit_result();
 }
 
 std::shared_ptr<ProposeToken>

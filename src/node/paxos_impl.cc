@@ -18,7 +18,12 @@ event_handler_start:
     inst_ids.clear();
     CommandT c;
 
-    while (!command_chan.try_pop(c)) {}
+    while (!command_chan.try_pop(c)) {
+      if (service_stop.load(std::memory_order_relaxed)) {
+        return;
+      } else
+        boost::this_fiber::sleep_for(std::chrono::milliseconds(10));
+    }
 
     std::move(c.first.begin(),
               c.first.end(),
@@ -102,7 +107,7 @@ leader_check:
     for (auto &invoker: invokers) {
       if (invoker.first != view.self_id) {
         auto index = indexer++;
-        boost::fibers::fiber([=, &finished, &collects, &inst_ids, &values]() {
+        boost::thread([=, &finished, &collects, &inst_ids, &values]() {
           auto commit_result =
             invoker.second->
               commit(view.epoch,
@@ -114,7 +119,8 @@ leader_check:
           if (commit_result.first) {
               collects[index].collect(std::move(commit_result.second));
           }
-          finished.fetch_add(1, std::memory_order_release);
+          std::atomic_thread_fence(std::memory_order_release);
+          finished.fetch_add(1, std::memory_order_relaxed);
         }).detach();
       }
     }
@@ -128,10 +134,10 @@ leader_check:
       records[inst_ids[i]] = record;
     }
 
-    auto quorum_size = (view.vm.size() + 1) / 2;
+    auto quorum_size = (view.vm.size() + 2) / 2;
 
     while (finished.load(std::memory_order_acquire) != view.vm.size()) {
-      boost::this_fiber::yield();
+      boost::this_thread::yield();
     }
 
 
@@ -175,44 +181,48 @@ leader_check:
       if (commit_results[index] < quorum_size) {
         values[index] = std::string();
         tokens[index]->finish_propose(false);
-      }
+      } else
+        tokens[index]->finish_propose(true);
     }
 
+    if (compact_and_check)
+      compact();
 
+    std::vector<boost::thread> fhs;
     indexer = 0;
     for (auto& invoker: invokers) {
       if (invoker.first != view.self_id) {
         auto index = indexer++;
-        if (compact_and_check && !leader_change &&
-            collects[index].has_value() &&
-            successive_ranges[index] < compacted_records.size()) {
-          auto values_clone = values;
-          auto inst_ids_clone = inst_ids;
-          for (unsigned i = successive_ranges[index];
-               i < compacted_records.size();++i) {
-            inst_ids_clone.push_back(i);
-            values_clone.push_back(compacted_records[i - 1].get_value());
-          }
+        auto f = boost::thread([=, &collects, &invoker, &values, &inst_ids]() {
+          if (compact_and_check && !leader_change &&
+              collects[index].has_value() &&
+              successive_ranges[index] < compacted_records.size()) {
+            auto values_clone = values;
+            auto inst_ids_clone = inst_ids;
+            for (unsigned i = successive_ranges[index];
+                 i < compacted_records.size();++i) {
+              inst_ids_clone.push_back(i);
+              values_clone.push_back(compacted_records[i - 1].get_value());
+            }
 
-          boost::fibers::fiber(
-            [=, &invoker, &finished]
-              (std::vector<InstanceIDT>&& ids,
-               std::vector<std::string>&& vls) {
+            boost::thread([=, &invoker]() {
               invoker.second->
                 learn(epoch,
                       self_id,
-                      ids,
-                      vls);
-          }, std::move(inst_ids_clone), std::move(values_clone)).detach();
-        } else {
-          boost::fibers::fiber([=, &invoker, &finished]() {
-            invoker.second->
-              learn(epoch,
-                    self_id,
-                    inst_ids,
-                    values);
-          }).detach();
-        }
+                      inst_ids_clone,
+                      values_clone);
+            }).detach();
+          } else {
+            boost::thread([=, &invoker]() {
+              invoker.second->
+                learn(epoch,
+                      self_id,
+                      inst_ids,
+                      values);
+            }).detach();
+          }
+        });
+        fhs.push_back(std::move(f));
       }
     }
 
@@ -220,11 +230,9 @@ leader_check:
     for (auto inst_id : inst_ids)
       records[inst_id].status = LEARNED;
 
-    for (auto index = 0;index < inst_ids.size();++index) {
-      if (commit_results[index] >= quorum_size) {
-        tokens[index]->finish_propose(true);
-      }
-    }
+    for (auto &f: fhs)
+      f.join();
+
 
     mtx.unlock();
   }
@@ -302,10 +310,9 @@ void
 PaxosImpl::init_invokers() {
   for (const auto&v : view.vm) {
     if (v.first != view.self_id) {
-      auto invoker = new PaxosInvoker(
-          grpc::CreateChannel(
-            v.second,
-            grpc::InsecureChannelCredentials()),
+      auto channel = grpc::CreateChannel(v.second, grpc::InsecureChannelCredentials());
+
+      auto invoker = new PaxosInvoker(channel,
           config.connection_check_timeout());
       invokers.insert({v.first, invoker});
     }
@@ -316,6 +323,7 @@ bool
 PaxosImpl::init(PaxosView&& view_, PaxosConfig&& config_) {
   leader_valid.store(true, std::memory_order_release);
   running_for_leader.store(false, std::memory_order_release);
+  service_stop.store(false, std::memory_order_release);
   next_id = 1;
   view = view_;
   config = config_;
@@ -330,20 +338,32 @@ PaxosImpl::init(PaxosView&& view_, PaxosConfig&& config_) {
 
   lease_timeout = uniform_dist(e1);
 
-  _waiting_handler = std::thread([=]() {
+  auto f = boost::thread([=]() {
     ServerBuilder builder;
     builder.AddListeningPort(
         view.vm[view.self_id],
         grpc::InsecureServerCredentials());
 
     builder.RegisterService(this);
-    auto service = std::move(builder.BuildAndStart());
-    service->Wait();
+    service = std::move(builder.BuildAndStart());
+    _waiting_handler = boost::thread([=](){
+      service->Wait();
+    });
   });
+  f.join();
 
   _receiving_handler =
-    std::thread(std::bind(&PaxosImpl::handle_proposals, this));
+    boost::thread(&PaxosImpl::handle_proposals, this);
   return true;
+}
+
+void
+PaxosImpl::stop() {
+  invokers.clear();
+  service->Shutdown();
+  service_stop.store(true, std::memory_order_release);
+  _waiting_handler.join();
+  _receiving_handler.join();
 }
 
 Status
@@ -363,8 +383,8 @@ PaxosImpl::propose(grpc::ServerContext* context,
       tokens.push_back(async_propose(request.value()));
     }
     for (auto &token : tokens) {
-      token->wait();
-      if (token->get_result()) {
+      token->wait_paxos_commit();
+      if (token->get_paxos_commit_result()) {
         reply.set_result(PaxosMsg::SUCCESS);
       } else {
         reply.set_result(PaxosMsg::FAILURE);
@@ -605,6 +625,7 @@ PaxosImpl::async_propose(const string& value) {
 
 bool
 PaxosImpl::request_for_leader() {
+  std::cout << "request for leader" << std::endl;
   mtx.lock();
   running_for_leader.store(true, std::memory_order_release);
   if (leader_valid.load(std::memory_order_acquire) &&
@@ -616,23 +637,23 @@ PaxosImpl::request_for_leader() {
   leader_valid.store(false, std::memory_order_release);
   view.self_role = CANDIDATE;
   view.epoch += 1;
-  auto quorum_size = (view.vm.size() + 1) / 2;
+  auto quorum_size = (view.vm.size() + 2) / 2;
   mtx.unlock();
   std::atomic<uint32_t> counter;
   std::atomic<uint32_t> finished;
-  std::vector<boost::fibers::fiber> fbs;
   counter.store(1, std::memory_order_release);
   finished.store(1, std::memory_order_release);
   for (auto &invoker: invokers) {
     if (invoker.first != view.self_id) {
-      boost::fibers::fiber([=, &counter, &finished]() {
+      boost::thread([=, &counter, &finished]() {
         auto vote_result =
           invoker.second->get_vote(view.epoch, view.self_id);
         if (vote_result.first) {
           if (vote_result.second.result() == PaxosMsg::SUCCESS)
-            counter.fetch_add(1, std::memory_order_release);
+            counter.fetch_add(1, std::memory_order_relaxed);
         }
-        finished.fetch_add(1, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_release);
+        finished.fetch_add(1, std::memory_order_relaxed);
       }).detach();
     }
   }
@@ -643,7 +664,7 @@ PaxosImpl::request_for_leader() {
       break;
     }
   }
-  if (counter.load(std::memory_order_acquire) < quorum_size) {
+  if (counter.load(std::memory_order_relaxed) < quorum_size) {
     std::cout << "request_leader failure" << std::endl;
     running_for_leader.store(false, std::memory_order_release);
     return false;
@@ -665,15 +686,16 @@ PaxosImpl::request_for_leader() {
   for (auto &invoker: invokers) {
     if (invoker.first != view.self_id) {
       auto index = indexer++;
-      boost::fibers::fiber([=, &counter, &finished, &collects, &learned_ranges]() {
+      boost::thread([=, &counter, &finished, &collects, &learned_ranges]() {
         auto vote_result =
           invoker.second->ask_follow(view.epoch, view.self_id, learned_ranges);
 
         if (vote_result.first) {
           collects[index].collect(std::move(vote_result.second));
-
         }
-        finished.fetch_add(1, std::memory_order_release);
+
+        std::atomic_thread_fence(std::memory_order_release);
+        finished.fetch_add(1, std::memory_order_relaxed);
       }).detach();
     }
   }
@@ -690,9 +712,13 @@ PaxosImpl::request_for_leader() {
   next_id = std::max(next_id,
               std::max(compacted_records.size() + 1,
                        records.size() == 0 ? next_id : records.rend()->first + 1));
+  std::vector<InstanceIDT> newly_learned_ids;
+  uint32_t successful_ask_follows = 1;
+
   for (auto &collect: collects) {
     auto index = indexer++;
     if (collect.has_value()) {
+      successful_ask_follows++;
       auto iter = collect->begin();
       if (iter->result() == PaxosMsg::FAILURE) {
         if (iter->epoch() > view.epoch) {
@@ -712,7 +738,7 @@ PaxosImpl::request_for_leader() {
           record.promised_epoch = iter->epoch();
           record.status = iter->val_learned() ? LEARNED : PREPARED;
           if (iter->instance_id() + 1 > next_id)
-            next_id = iter->instance_id();
+            next_id = iter->instance_id() + 1;
           auto record_pair = std::make_pair(iter->instance_id(), std::move(record));
           auto result = records.insert(std::move(record_pair));
           if (!result.second) {
@@ -722,19 +748,34 @@ PaxosImpl::request_for_leader() {
                 records[result.first->first].promised_epoch) {
               records[result.first->first].value = result.first->second.value;
             }
-          }
+          } else
+            newly_learned_ids.push_back(iter->instance_id());
           iter++;
         }
 
         if (iter != collect->end() &&
             iter->result() == PaxosMsg::REQUIRE) {
-          std::move(iter->ranges().begin(),
-                    iter->ranges().end(),
-                    std::back_inserter(require_ranges[index]));
+          for (auto i = iter->ranges().cbegin();
+               i != iter->ranges().cend();
+               i += 2) {
+            for (InstanceIDT j = *i;j < *(i + 1);++j) {
+              require_ranges[index].push_back(j);
+            }
+          }
         }
       }
     }
   }
+
+  // not enough successful ask_follow replies
+  // return and wait for valid leader or timeout
+  if (successful_ask_follows < quorum_size) {
+    running_for_leader.store(false, std::memory_order_release);
+    mtx.unlock();
+    return false;
+  }
+
+  std::sort(newly_learned_ids.begin(), newly_learned_ids.end());
 
   // find empty holes and set them blank
   PaxosRecord blank;
@@ -764,7 +805,7 @@ PaxosImpl::request_for_leader() {
     for (auto &invoker: invokers) {
       if (invoker.first != view.self_id) {
         auto index = indexer++;
-        boost::fibers::fiber([=, &finished, &inst_ids, &values, &collects2]() {
+        boost::thread([=, &finished, &inst_ids, &values, &collects2]() {
           auto commit_result =
             invoker.second->
               commit(view.epoch,
@@ -775,7 +816,8 @@ PaxosImpl::request_for_leader() {
           if (commit_result.first) {
             collects2[index].collect(std::move(commit_result.second));
           }
-          finished.fetch_add(1, std::memory_order_release);
+          std::atomic_thread_fence(std::memory_order_release);
+          finished.fetch_add(1, std::memory_order_relaxed);
         }).detach();
       }
     }
@@ -825,39 +867,46 @@ PaxosImpl::request_for_leader() {
     }
   }
 
+  std::vector<boost::thread> ths;
   // finish learn
   indexer = 0;
   for (auto& invoker: invokers) {
     if (invoker.first != view.self_id) {
       auto index = indexer++;
-      auto f = boost::fibers::fiber([=, &invoker](std::vector<InstanceIDT>&& require_ranges) mutable {
-        auto iter = require_ranges.begin();
-        while (iter != require_ranges.end()) {
-          for (InstanceIDT i = *iter;i <= *(iter + 1);++i) {
-            inst_ids.push_back(i);
-            if (i > compacted_records.size()) {
-              values.push_back(records[i].value);
-            } else
-              values.push_back(compacted_records[i - 1].get_value());
-          }
-          iter += 2;
+      auto f = boost::thread([=, &invoker, &require_ranges]() mutable {
+        for (auto inst_id: require_ranges[index]) {
+          inst_ids.push_back(inst_id);
+          if (inst_id > compacted_records.size()) {
+            values.push_back(records[inst_id].value);
+          } else
+            values.push_back(compacted_records[inst_id - 1].get_value());
         }
+
+        auto new_learn_ids = diff_ids(newly_learned_ids, require_ranges[index]).first;
+
+        for (auto inst_id: newly_learned_ids) {
+          inst_ids.push_back(inst_id);
+          if (inst_id > compacted_records.size()) {
+            values.push_back(records[inst_id].value);
+          } else
+            values.push_back(compacted_records[inst_id - 1].get_value());
+        }
+
         if (!inst_ids.empty()) {
-          boost::fibers::fiber([=, &invoker](std::vector<InstanceIDT>&& inst_ids,
-                                             std::vector<std::string>&& values) {
+          boost::thread([=, &invoker]() {
             invoker.second->
               learn(view.epoch,
                     view.self_id,
                     inst_ids,
                     values);
-          }, std::move(inst_ids), std::move(values)).detach();
+          }).detach();
         }
-      }, std::move(require_ranges[index]));
-      fbs.push_back(std::move(f));
+      });
+      ths.push_back(std::move(f));
     }
   }
 
-  for (auto &f: fbs)
+  for (auto &f: ths)
     f.join();
 
   mtx.unlock();
@@ -890,7 +939,7 @@ PaxosImpl::compact() {
     else if (iter->second.status != LEARNED){
       break;
     } else {
-      compacted_records.push_back(iter->second);
+      compacted_records.push_back(std::move(iter->second));
       iter = records.erase(iter);
     }
     ++successive_learned;

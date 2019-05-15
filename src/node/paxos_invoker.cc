@@ -37,7 +37,7 @@ PaxosInvoker::propose(const std::vector<std::string>& value) {
   if (status.ok()) {
     return std::make_pair(true, std::shared_ptr<std::vector<PaxosMsg>>(replies));
   } else {
-    std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
+    std::cerr << "error_info: error_code: " <<  status.error_code() << ": " << status.error_message() << std::endl;
     if (do_check_state())
       abort();
     else
@@ -96,7 +96,7 @@ PaxosInvoker::commit(EpochT epoch, NodeIDT node_id,
   if (status.ok()) {
     return std::make_pair(true, std::shared_ptr<std::vector<PaxosMsg>>(replies));
   } else {
-    std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
+    std::cerr << "error_info: error_code: " <<  status.error_code() << ": " << status.error_message() << std::endl;
     if (do_check_state())
       abort();
     else
@@ -148,9 +148,10 @@ PaxosInvoker::learn(EpochT epoch, NodeIDT node_id,
     return std::make_pair(true, std::shared_ptr<std::vector<PaxosMsg>>(replies));
   } else {
     std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
-    if (do_check_state())
+    if (do_check_state()){
+      std::cerr << "error_info: error_code: " <<  status.error_code() << ": " << status.error_message() << std::endl;
       abort();
-    else
+    } else
       return std::make_pair(false, nullptr);
   }
 }
@@ -172,7 +173,7 @@ PaxosInvoker::get_vote(EpochT epoch, NodeIDT node_id) {
   if (status.ok()) {
     return std::make_pair(true, reply);
   } else {
-    std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
+    std::cerr << "error_info" <<  status.error_code() << ": " << status.error_message() << std::endl;
     if (do_check_state())
       abort();
     else
@@ -204,7 +205,7 @@ PaxosInvoker::ask_follow(EpochT epoch, NodeIDT node_id,
   if (status.ok()) {
     return std::make_pair(true, std::shared_ptr<std::vector<PaxosMsg>>(replies));
   } else {
-    std::cerr << status.error_code() << ": " << status.error_message() << std::endl;
+    std::cerr << "error_info" <<  status.error_code() << ": " << status.error_message() << std::endl;
     if (do_check_state())
       abort();
     else

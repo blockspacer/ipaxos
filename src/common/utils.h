@@ -18,7 +18,7 @@ diff_ranges(T a,
   auto diffs = std::make_pair(std::vector<uint64_t>(), std::vector<uint64_t>());
   std::vector<uint64_t> ranges;
   if (a.size() == 0) {
-    diffs.second = std::move(b);
+    std::move(b.begin(), b.end(), std::back_inserter(diffs.second));
     return diffs;
   }
   
@@ -94,4 +94,71 @@ diff_ranges(T a,
 
   return diffs;
 }
+
+
+// diff_ids requires sorted inputs
+template<typename T, typename U>
+std::pair<std::vector<uint64_t>, std::vector<uint64_t>>
+diff_ids(T a, U b) {
+  auto diffs = std::make_pair(std::vector<uint64_t>(), std::vector<uint64_t>());
+  std::vector<uint64_t> ranges;
+  if (a.size() == 0) {
+    std::move(b.cbegin(), b.cend(), std::back_inserter(diffs.second));
+    return diffs;
+  }
+  
+  if (b.size() == 0) {
+    std::move(a.cbegin(), a.cend(), std::back_inserter(diffs.first));
+    return diffs;
+  }
+
+  auto iter_a = a.cbegin();
+  auto iter_b = b.cbegin();
+
+  while (iter_a != a.cend() &&
+         iter_b != b.cend()) {
+
+    while (*iter_a < *iter_b &&
+           iter_a != a.cend()) {
+      diffs.first.push_back(*iter_a);
+      iter_a++;
+    }
+
+    if (iter_a == a.cend())
+      break;
+
+    while (*iter_b < *iter_a &&
+        iter_b != b.cend()) {
+      diffs.second.push_back(*iter_b);
+      iter_b++;
+    }
+
+    if (iter_b == b.cend())
+      break;
+
+    if (*iter_a == *iter_b) {
+      ++iter_a;
+      ++iter_b;
+    }
+  }
+
+  if (iter_a == a.cend()) {
+    while (iter_b != b.cend()) {
+      diffs.second.push_back(*iter_b);
+      iter_b++;
+    }
+    return diffs;
+  }
+
+  if (iter_b == b.cend()) {
+    while (iter_a != a.cend()) {
+      diffs.first.push_back(*iter_a);
+      iter_a++;
+    }
+    return diffs;
+  }
+
+  return diffs;
+}
+
 #endif

@@ -14,10 +14,8 @@ int main()
   vm[0] = "localhost:40000";
   vm[1] = "localhost:40001";
   vm[2] = "localhost:40002";
-
   PaxosRole roles[NODE_SIZE] = {PaxosRole::LEADER,
       PaxosRole::FOLLOWER, PaxosRole::FOLLOWER};
-
   PaxosNode nodes[NODE_SIZE];
   auto config = PaxosConfig();
 
@@ -32,18 +30,20 @@ int main()
     nodes[i].init_invokers();
   }
 
+  nodes[0].stop();
+
 
   auto start = std::chrono::system_clock::now();
   auto thread_count = std::thread::hardware_concurrency();
   boost::basic_thread_pool pool(thread_count);
-  for (int j = 0;j < 3;++j) {
+  for (int j = 0;j < 2;++j) {
     pool.submit([&, j]() {
       std::vector<boost::fibers::fiber> handles;
       for (int i = 0;i < 10000;++i) {
         auto e = std::to_string(i);
         auto t = boost::fibers::fiber([&, j, e](){
           ClientContext context;
-          auto t = nodes[j].async_propose(e);
+          auto t = nodes[j+1].async_propose(e);
           t->wait_paxos_commit();
         });
         handles.push_back(std::move(t));
@@ -54,7 +54,7 @@ int main()
       handles.clear();
     });
   }
-  // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
   pool.close();
   pool.join();
 
@@ -62,11 +62,10 @@ int main()
   std::cout << static_cast<double>(diff.count()) / 1000000000 << std::endl;
 
 
-  auto a = nodes[0].debug_record();
   auto b = nodes[1].debug_record();
   auto c = nodes[2].debug_record();
-  for (auto& kv:a)
-    assert(c[kv.first] == b[kv.first] && c[kv.first] == kv.second);
+  for (auto& kv:b)
+    assert(c[kv.first] == kv.second);
 
   for (int i = 0;i < NODE_SIZE;++i)
      nodes[i].stop();

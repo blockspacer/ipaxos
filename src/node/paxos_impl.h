@@ -53,24 +53,42 @@ class ProposeToken {
   friend class PaxosImpl;
 public:
   ProposeToken() {
-      finish.store(false, std::memory_order_release);
-    }
+    finish.store(false, std::memory_order_release);
+  }
 
-  inline bool is_finished() {
+  inline bool paxos_commit_finished() {
     return finish.load(std::memory_order_acquire);
   }
 
-  inline void wait() {
-    while (!finish.load(std::memory_order_acquire))
+  inline void wait_paxos_commit() {
+    while (!paxos_commit_finished())
       boost::this_fiber::yield();
   }
 
-  inline bool get_result() {
+  inline bool get_paxos_commit_result() {
     return success;
+  }
+
+  inline bool is_executed() {
+    return executed.load(std::memory_order_acquire);
+  }
+
+  inline void wait_executed() {
+    wait_paxos_commit();
+    while (!is_executed())
+      boost::this_fiber::yield();
+  }
+
+  inline std::string&& get_exection_result() {
+    return std::move(std::string(execution_result));
   }
 
   inline bool has_id() {
     return id != 0;
+  }
+
+  inline InstanceIDT get_id() {
+    return id;
   }
 
 private:
@@ -78,10 +96,18 @@ private:
     success = true;
     finish.store(true, std::memory_order_release);
   }
+
+  void finish_execution(std::string&& value) {
+    execution_result = std::move(value);
+    executed.store(true, std::memory_order_release);
+  }
+
   InstanceIDT id = 0;
   EpochT epoch = 0;
   bool success = false;
   std::atomic<bool> finish;
+  std::string execution_result;
+  std::atomic<bool> executed;
 };
 
 class PaxosView {
@@ -97,7 +123,6 @@ public:
     self_id = self_id_;
     self_role = self_role_;
     leader_id = leader_id_;
-    std::cout << "self_id: " << self_id_ << std::endl;
     return true;
   }
 
@@ -118,7 +143,6 @@ public:
       chan_ = channel;
     check_point = std::chrono::system_clock::now() + std::chrono::seconds(connection_check_timeout);
   }
-
   std::pair<bool, std::shared_ptr<std::vector<PaxosMsg>>>
   commit(EpochT epoch, NodeIDT node_id,
          std::vector<InstanceIDT> instance_id,
@@ -161,7 +185,6 @@ private:
     }
   }
 
-
   std::chrono::time_point<std::chrono::system_clock> check_point;
   uint32_t connection_check_timeout = 0xFFFFFFF;
   bool online = true;
@@ -176,6 +199,7 @@ class PaxosImpl final : public Paxos::Service {
 public:
   class PaxosRecord;
   bool init(PaxosView&& view, PaxosConfig&& config);
+  void stop();
   void init_invokers();
   std::shared_ptr<ProposeToken> async_propose(const std::string &);
   // std::shared_ptr<ProposeToken> async_propose(const std::vector<std::string> &);
@@ -219,8 +243,9 @@ public:
 
   std::map<InstanceIDT, PaxosRecord> debug_record() {
     mtx.lock();
-    return records;
+    auto result =  records;
     mtx.unlock();
+    return result;
   }
 
   void debug_print() {
@@ -286,7 +311,7 @@ private:
   std::vector<InstanceIDT> get_known_ranges();
   InstanceIDT compact();
 
-  boost::fibers::mutex mtx;
+  std::mutex mtx;
 
   // record empty holes
   std::map<InstanceIDT, PaxosRecord> records;
@@ -294,8 +319,10 @@ private:
   // moved after it is applied
   std::vector<PaxosLearnedIndex> compacted_records;
 
-  std::thread _waiting_handler;
-  std::thread _receiving_handler;
+  boost::thread _waiting_handler;
+  boost::thread _receiving_handler;
+  std::atomic<bool> service_stop;
+  std::unique_ptr<grpc::Server> service;
 
   InstanceIDT next_id;
   std::atomic<bool> leader_valid;
